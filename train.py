@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
+from torch.amp import autocast, GradScaler
 
 from dataset import BilingualDataset,causal_mask
 
@@ -147,8 +148,13 @@ def get_ds(config):
     print(f'Max length of source sentence: {max_len_src}')
     print(f'Max length of target sentence: {max_len_tgt}')
     
-    train_dataloader = DataLoader( train_ds, batch_size=config['batch_size'], shuffle=True)
-    val_dataloader = DataLoader( val_ds, batch_size=1, shuffle=True)
+    train_dataloader = DataLoader(
+    train_ds,
+    batch_size=config['batch_size'],
+    shuffle=True,
+    pin_memory=True
+)
+    val_dataloader = DataLoader( val_ds, batch_size=1, shuffle=False)
     
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
@@ -172,7 +178,13 @@ def train_model(config):
     
     writer = SummaryWriter(config['experiment_name'])
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
+    optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=config['lr'],
+    weight_decay=config['weight_decay'],
+    eps=1e-9
+)
+    scaler = GradScaler("cuda")
     
     intial_epoch = 0
     global_step = 0
@@ -185,7 +197,7 @@ def train_model(config):
         optimizer.load_state_dict(state['optimizer_state_dict'])
         global_step = state['global_step']
     
-    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device) 
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_tgt.token_to_id('[PAD]'), label_smoothing=0.1).to(device) 
     # label smoothing helps reduce overfit and increase accuracy by reducing very high confidence of model making it a just bit less sure of its choices
     
     # TRAINING LOOP 
@@ -194,38 +206,56 @@ def train_model(config):
         
         batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch {epoch:02d}')
         
-        for batch in batch_iterator:
+        for batch_index, batch in enumerate(batch_iterator):
             model.train()
             
-            encoder_input = batch['encoder_input'].to(device) # ( B,seq_len)
-            decoder_input = batch['decoder_input'].to(device) # ( B,seq_len)
-            encoder_mask = batch['encoder_mask'].to(device)  # ( B, 1, 1, seq_len)
-            decoder_mask = batch['decoder_mask'].to(device)  # ( B,1, seq_len, seq_len)
+            encoder_input = batch['encoder_input'].to(device, non_blocking=True) # ( B,seq_len)
+            decoder_input = batch['decoder_input'].to(device, non_blocking=True) # ( B,seq_len)
+            encoder_mask = batch['encoder_mask'].to(device, non_blocking=True)  # ( B, 1, 1, seq_len)
+            decoder_mask = batch['decoder_mask'].to(device, non_blocking=True)  # ( B,1, seq_len, seq_len)
             
             # Run the tensors throught the transformers
-            encoder_output = model.encode(encoder_input, encoder_mask)  # ( B, seq_len, d_model)
-            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input,decoder_mask) # ( B, seq_len, d_model)
-            proj_output = model.project(decoder_output) # ( B, seq_len, tgt_vocab_size)
+            # encoder_output = model.encode(encoder_input, encoder_mask)  # ( B, seq_len, d_model)
+            # decoder_output = model.decode(encoder_output, encoder_mask, decoder_input,decoder_mask) # ( B, seq_len, d_model)
+            # proj_output = model.project(decoder_output) # ( B, seq_len, tgt_vocab_size)
+            
+            with autocast("cuda"):
+                encoder_output = model.encode(encoder_input, encoder_mask)
+                decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask)
+                proj_output = model.project(decoder_output)
+
+                label = batch['label'].to(device, non_blocking=True)
+
+                loss = loss_fn(
+                    proj_output.view(-1, tokenizer_tgt.get_vocab_size()),
+                    label.view(-1)
+                )
             
             label = batch['label'].to(device) # ( B, seq_len)
             
             #  ( B, seq_len, tgt_vocab_size) -->> ( B * seq_len, tgt_vocab_size)
             
-            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()) , label.view(-1))
-            batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
-            
+
             # Log the LOSS
             
             writer.add_scalar('train loss', loss.item(), global_step)
             writer.flush()
             
             # Backpropagate the loss
-            loss.backward()
+            # loss.backward()
             
             # update the weights
-            optimizer.step()
-            optimizer.zero_grad()
+            # optimizer.step()
+            # optimizer.zero_grad()
             
+            loss = loss / config["gradient_accumulation_steps"]
+            scaler.scale(loss).backward()
+            
+            if (batch_index + 1) % config["gradient_accumulation_steps"] == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+
             
             
             global_step += 1
