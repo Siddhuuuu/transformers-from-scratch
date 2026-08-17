@@ -121,7 +121,7 @@ def get_or_build_tokenizer(config, ds, lang):
     return tokenizer
     
 def get_ds(config):
-    ds_raw = load_dataset('Helsinki-NLP/opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}',split='train')
+    ds_raw = load_dataset('cfilt/iitb-english-hindi',split='train')
     
     # build tokenizers
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
@@ -140,7 +140,7 @@ def get_ds(config):
     
     for item in ds_raw:
         src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_src.encode(item['translation'][config['lang_tgt']]).ids
+        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
         max_len_src = max( max_len_src, len(src_ids))
         max_len_tgt = max( max_len_tgt, len(tgt_ids))
     
