@@ -9,10 +9,13 @@ from model import build_transformer
 
 from datasets import load_dataset
 from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.trainers import WordLevelTrainer
-from tokenizers.pre_tokenizers import Whitespace
+# from tokenizers.models import WordLevel
+# from tokenizers.trainers import WordLevelTrainer
 
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+
+from tokenizers.pre_tokenizers import Whitespace
 
 from pathlib import Path
 
@@ -25,8 +28,9 @@ from tqdm import tqdm
 import warnings
 
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
-    sos_idx = tokenizer_tgt.token_to_id(['SOS'])
-    eos_idx = tokenizer_tgt.token_to_id(['EOS'])
+    
+    sos_idx = tokenizer_tgt.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
     
     # precompute the encoder output and reuse it for every token we get from the decoder
     encoder_ouput = model.encode(source, source_mask)
@@ -95,7 +99,7 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
             print_msg('-'*console_width)
             print_msg(f'SOURCE:{source_text}')
             print_msg(f'TARGET:{target_text}')
-            print_msg(f'SOURCE:{model_out_text}')
+            print_msg(f'PREDICTED:{model_out_text}')
             
             if count == num_examples:
                 break
@@ -112,9 +116,13 @@ def get_or_build_tokenizer(config, ds, lang):
     # config['tokenizer_file'] = '../tokenizers/tokinzer_{0}.json' 
     tokenizer_path = Path(config['tokenizer_file'].format(lang))
     if not Path.exists(tokenizer_path):
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
+        tokenizer = Tokenizer(BPE(unk_token='[UNK]'))
         tokenizer.pre_tokenizer = Whitespace()
-        trainer = WordLevelTrainer(special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
+        trainer = BpeTrainer(
+            special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"],
+            min_frequency=2,
+            vocab_size=16000
+        )
         tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
         tokenizer.save(str(tokenizer_path))
     else:
@@ -129,12 +137,18 @@ def get_ds(config):
     tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
     
     # keep 90 percent for training and 10 percent for validation
-    train_ds_size = int(0.9 * len(ds_raw))
-    val_ds_size = len(ds_raw) - train_ds_size
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size,val_ds_size])
+    #train_ds_size = int(0.9 * len(ds_raw))
+    #val_ds_size = len(ds_raw) - train_ds_size
+    #train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size,val_ds_size])
     
-    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    ds_train = ds_raw
+    ds_val = load_dataset('cfilt/iitb-english-hindi',split='validation')
+    
+    train_ds = BilingualDataset(ds_train, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    val_ds = BilingualDataset(ds_val, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    
+    #train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    #val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
 
     max_len_src = 0
     max_len_tgt = 0
@@ -231,7 +245,7 @@ def train_model(config):
                     label.view(-1)
                 )
             
-            label = batch['label'].to(device) # ( B, seq_len)
+            #label = batch['label'].to(device) # ( B, seq_len)
             
             #  ( B, seq_len, tgt_vocab_size) -->> ( B * seq_len, tgt_vocab_size)
             
@@ -251,7 +265,8 @@ def train_model(config):
             loss = loss / config["gradient_accumulation_steps"]
             scaler.scale(loss).backward()
             
-            if (batch_index + 1) % config["gradient_accumulation_steps"] == 0:
+            if ((batch_index + 1) % config["gradient_accumulation_steps"] == 0
+                    or (batch_index + 1) == len(train_dataloader)):
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
