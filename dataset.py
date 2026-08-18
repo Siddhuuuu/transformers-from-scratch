@@ -14,6 +14,22 @@ class BilingualDataset(Dataset):
         self.tgt_lang = tgt_lang
         self.seq_len = seq_len
         
+        self.tokenized_src = []
+        self.tokenized_tgt = []
+
+        for item in self.ds:
+            self.tokenized_src.append(
+                self.tokenizer_src.encode(
+                    item['translation'][self.src_lang]
+                ).ids
+            )
+
+            self.tokenized_tgt.append(
+                self.tokenizer_tgt.encode(
+                    item['translation'][self.tgt_lang]
+                ).ids
+            )       
+        
         self.sos_token = torch.tensor([tokenizer_src.token_to_id('[SOS]')], dtype=torch.int64)
         self.eos_token = torch.tensor([tokenizer_src.token_to_id('[EOS]')], dtype=torch.int64)
         self.pad_token = torch.tensor([tokenizer_src.token_to_id('[PAD]')], dtype=torch.int64)
@@ -26,8 +42,8 @@ class BilingualDataset(Dataset):
         src_text = src_target_pair['translation'][self.src_lang]
         tgt_text = src_target_pair['translation'][self.tgt_lang]
         
-        enc_input_tokens = self.tokenizer_src.encode(src_text).ids
-        dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids
+        enc_input_tokens = self.tokenized_src[index]
+        dec_input_tokens = self.tokenized_tgt[index]
         
         enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2 # minus 2 because of SOS AND EOS tokens included
         dec_num_padding_tokens = self.seq_len - len(dec_input_tokens) - 1 # minus 1 because in training we only add SOS token in decoder side and during label we only add EOS 

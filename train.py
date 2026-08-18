@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from torch.amp import autocast, GradScaler
 
 from dataset import BilingualDataset,causal_mask
@@ -141,14 +141,60 @@ def get_ds(config):
     #val_ds_size = len(ds_raw) - train_ds_size
     #train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size,val_ds_size])
     
-    ds_train = ds_raw
-    ds_val = load_dataset('cfilt/iitb-english-hindi',split='validation')
+    ## ds_train = ds_raw
+    ## ds_val = load_dataset('cfilt/iitb-english-hindi',split='validation')
     
-    train_ds = BilingualDataset(ds_train, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    val_ds = BilingualDataset(ds_val, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    ## train_ds = BilingualDataset(ds_train, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    ## val_ds = BilingualDataset(ds_val, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
     
     #train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
     #val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    
+    # this dataset has max sentence of length 3017 which is an outlier
+    # 99.98% of the training examples fit within 256 tokens, so we filter the few extreme outliers
+    # to keep a fixed sequence length without wasting memory on unnecessarily long sequences
+    
+    def fits_seq_len(item):
+        src_len = len(
+            tokenizer_src.encode(item['translation'][config['lang_src']]).ids
+        ) + 2
+
+        tgt_len = len(
+            tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
+        ) + 1
+
+        return max(src_len, tgt_len) <= config['seq_len']
+
+
+    print(f"Original training examples: {len(ds_raw)}")
+
+    ds_train = ds_raw.filter(fits_seq_len)
+
+    print(f"Filtered training examples: {len(ds_train)}")
+    print(f"Removed training examples: {len(ds_raw) - len(ds_train)}")
+
+    ds_val = load_dataset(
+        'cfilt/iitb-english-hindi',
+        split='validation'
+    )
+
+    train_ds = BilingualDataset(
+        ds_train,
+        tokenizer_src,
+        tokenizer_tgt,
+        config['lang_src'],
+        config['lang_tgt'],
+        config['seq_len']
+    )
+
+    val_ds = BilingualDataset(
+        ds_val,
+        tokenizer_src,
+        tokenizer_tgt,
+        config['lang_src'],
+        config['lang_tgt'],
+        config['seq_len']
+    )
 
     max_len_src = 0
     max_len_tgt = 0
@@ -166,9 +212,11 @@ def get_ds(config):
     train_ds,
     batch_size=config['batch_size'],
     shuffle=True,
-    pin_memory=True
+    pin_memory=True,
+    num_workers=2,
+    persistent_workers=True
 )
-    val_dataloader = DataLoader( val_ds, batch_size=1, shuffle=False)
+    val_dataloader = DataLoader( val_ds, batch_size=1, shuffle=False, num_workers=2, persistent_workers=True)
     
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
@@ -253,7 +301,7 @@ def train_model(config):
             # Log the LOSS
             
             writer.add_scalar('train loss', loss.item(), global_step)
-            writer.flush()
+            
             
             # Backpropagate the loss
             # loss.backward()
@@ -269,13 +317,15 @@ def train_model(config):
                     or (batch_index + 1) == len(train_dataloader)):
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
             
             
             global_step += 1
             
         run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
+        
+        writer.flush()
             
             # save the model at the end of the every epoch
             

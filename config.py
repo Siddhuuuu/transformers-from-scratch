@@ -10,7 +10,7 @@ def get_config():
         "lr": 3e-4,
         "weight_decay": 1e-2,
 
-        "seq_len": 128,
+        "seq_len": 256,
 
         "d_model": 512,
         "N": 6,
