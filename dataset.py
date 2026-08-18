@@ -39,8 +39,9 @@ class BilingualDataset(Dataset):
     
     def __getitem__(self, index : any) -> any:
         src_target_pair = self.ds[index]
-        src_text = src_target_pair['translation'][self.src_lang]
-        tgt_text = src_target_pair['translation'][self.tgt_lang]
+
+        src_text = src_target_pair['en']
+        tgt_text = src_target_pair['hi_en']
         
         enc_input_tokens = self.tokenized_src[index]
         dec_input_tokens = self.tokenized_tgt[index]

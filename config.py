@@ -19,7 +19,7 @@ def get_config():
         "dropout": 0.1,
 
         "lang_src": "en",
-        "lang_tgt": "hi",
+        "lang_tgt": "hi_en",
 
         "model_folder": "weights",
         "model_basename": "tmodel_",

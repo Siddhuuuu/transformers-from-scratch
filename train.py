@@ -109,7 +109,7 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
 
 def get_all_sentences(ds, lang):
     for item in ds:
-        yield item['translation'][lang]
+        yield item[lang]
     
 
 def get_or_build_tokenizer(config, ds, lang):
@@ -130,94 +130,90 @@ def get_or_build_tokenizer(config, ds, lang):
     return tokenizer
     
 def get_ds(config):
-    ds_raw = load_dataset('cfilt/iitb-english-hindi',split='train')
+    ds_train_raw = load_dataset(
+        'rvv-karma/English-Hinglish-TOP',
+        split='train'
+    )
+
+    ds_val_raw = load_dataset(
+        'rvv-karma/English-Hinglish-TOP',
+        split='validation'
+    )
     
+    print(f"Validation examples: {len(ds_val_raw)}")
+
     # build tokenizers
-    tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
-    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
-    
-    # keep 90 percent for training and 10 percent for validation
-    #train_ds_size = int(0.9 * len(ds_raw))
-    #val_ds_size = len(ds_raw) - train_ds_size
-    #train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size,val_ds_size])
-    
-    ## ds_train = ds_raw
-    ## ds_val = load_dataset('cfilt/iitb-english-hindi',split='validation')
-    
-    ## train_ds = BilingualDataset(ds_train, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    ## val_ds = BilingualDataset(ds_val, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    
-    #train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    #val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    
-    # this dataset has max sentence of length 3017 which is an outlier
-    # 99.98% of the training examples fit within 256 tokens, so we filter the few extreme outliers
-    # to keep a fixed sequence length without wasting memory on unnecessarily long sequences
-    
+    tokenizer_src = get_or_build_tokenizer(
+        config,
+        ds_train_raw,
+        config['lang_src']
+    )
+
+    tokenizer_tgt = get_or_build_tokenizer(
+        config,
+        ds_train_raw,
+        config['lang_tgt']
+    )
+
+    # this dataset uses separate fields for English and Hinglish
     def fits_seq_len(item):
         src_len = len(
-            tokenizer_src.encode(item['translation'][config['lang_src']]).ids
+            tokenizer_src.encode(item['en']).ids
         ) + 2
 
         tgt_len = len(
-            tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
+            tokenizer_tgt.encode(item['hi_en']).ids
         ) + 1
 
         return max(src_len, tgt_len) <= config['seq_len']
 
+    print(f"Original training examples: {len(ds_train_raw)}")
 
-    print(f"Original training examples: {len(ds_raw)}")
+    ds_train = ds_train_raw.filter(fits_seq_len)
+    ds_val = ds_val_raw.filter(fits_seq_len)
 
-    ds_train = ds_raw.filter(fits_seq_len)
+    print(f"Filtered validation examples: {len(ds_val)}")
+    print(f"Removed validation examples: {len(ds_val_raw) - len(ds_val)}")
+    
+    
 
     print(f"Filtered training examples: {len(ds_train)}")
-    print(f"Removed training examples: {len(ds_raw) - len(ds_train)}")
+    print(f"Removed training examples: {len(ds_train_raw) - len(ds_train)}")
 
-    ds_val = load_dataset(
-        'cfilt/iitb-english-hindi',
-        split='validation'
-    )
+    train_ds = BilingualDataset( ds_train, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
 
-    train_ds = BilingualDataset(
-        ds_train,
-        tokenizer_src,
-        tokenizer_tgt,
-        config['lang_src'],
-        config['lang_tgt'],
-        config['seq_len']
-    )
-
-    val_ds = BilingualDataset(
-        ds_val,
-        tokenizer_src,
-        tokenizer_tgt,
-        config['lang_src'],
-        config['lang_tgt'],
-        config['seq_len']
-    )
+    val_ds = BilingualDataset( ds_val, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'] )
 
     max_len_src = 0
     max_len_tgt = 0
-    
-    for item in ds_raw:
-        src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
-        max_len_src = max( max_len_src, len(src_ids))
-        max_len_tgt = max( max_len_tgt, len(tgt_ids))
-    
+
+    for item in ds_train:
+        src_ids = tokenizer_src.encode(item['en']).ids
+        tgt_ids = tokenizer_tgt.encode(item['hi_en']).ids
+
+        max_len_src = max(max_len_src, len(src_ids))
+        max_len_tgt = max(max_len_tgt, len(tgt_ids))
+
     print(f'Max length of source sentence: {max_len_src}')
     print(f'Max length of target sentence: {max_len_tgt}')
-    
+
     train_dataloader = DataLoader(
-    train_ds,
-    batch_size=config['batch_size'],
-    shuffle=True,
-    pin_memory=True,
-    num_workers=2,
-    persistent_workers=True
-)
-    val_dataloader = DataLoader( val_ds, batch_size=1, shuffle=False, num_workers=2, persistent_workers=True)
-    
+        train_ds,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        pin_memory=True,
+        num_workers=2,
+        persistent_workers=True
+    )
+
+    val_dataloader = DataLoader(
+        val_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=2,
+        persistent_workers=True
+    )
+
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
 
