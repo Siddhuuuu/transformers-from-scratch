@@ -135,7 +135,7 @@ def get_ds(config):
 
     ds_val_raw = load_dataset(
         'rvv-karma/English-Hinglish-TOP',
-        split='validation'
+        split='val'
     )
     
     print(f"Validation examples: {len(ds_val_raw)}")
