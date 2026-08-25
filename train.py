@@ -16,7 +16,6 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 
 from tokenizers.pre_tokenizers import Whitespace
-
 from pathlib import Path
 
 from torch.utils.tensorboard import SummaryWriter
@@ -26,6 +25,7 @@ from config import get_weights_file_path, get_config
 from tqdm import tqdm
 
 import warnings
+
 
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
     
@@ -71,7 +71,6 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
     ##source_texts = []
     ##expected = []
     ##predicted = []
-    
     # size of the control window ( just use a default value )
     console_width = 80
     
@@ -92,7 +91,6 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
             ##source_texts.append(source_text)
             ##expected.append(target_text)
             ##predicted.append(model_out_text)
-            
             # print to the console
             # why print msg why no direct print reason is tdqm
             
@@ -156,26 +154,51 @@ def get_ds(config):
     )
 
     # this dataset uses separate fields for English and Hinglish
-    def fits_seq_len(item):
-        src_len = len(
-            tokenizer_src.encode(item['en']).ids
-        ) + 2
+    # def fits_seq_len(item):
+    #     src_len = len(
+    #         tokenizer_src.encode(item['en']).ids
+    #     ) + 2
 
-        tgt_len = len(
-            tokenizer_tgt.encode(item['hi_en']).ids
-        ) + 1
+    #     tgt_len = len(
+    #         tokenizer_tgt.encode(item['hi_en']).ids
+    #     ) + 1
 
-        return max(src_len, tgt_len) <= config['seq_len']
+    #     return max(src_len, tgt_len) <= config['seq_len']
 
-    print(f"Original training examples: {len(ds_train_raw)}")
+    # print(f"Original training examples: {len(ds_train_raw)}")
 
-    ds_train = ds_train_raw.filter(fits_seq_len)
-    ds_val = ds_val_raw.filter(fits_seq_len)
+    # ds_train = ds_train_raw.filter(fits_seq_len)
+    # ds_val = ds_val_raw.filter(fits_seq_len)
+    
+    def tokenize_and_filter(batch):
+        src_tokens = tokenizer_src.encode_batch(batch['en'])
+        tgt_tokens = tokenizer_tgt.encode_batch(batch['hi_en'])
+        
+        keep_indices = []
+        src_ids = []
+        tgt_ids = []
+        
+        for i in range(len(batch['en'])):
+            src_len = len(src_tokens[i].ids) + 2
+            tgt_len = len(tgt_tokens[i].ids) + 1
+            if max(src_len, tgt_len) <= config['seq_len']:
+                keep_indices.append(i)
+                src_ids.append(src_tokens[i].ids)
+                tgt_ids.append(tgt_tokens[i].ids)
+                
+        return {
+            'src_ids': src_ids,
+            'tgt_ids': tgt_ids,
+            'en': [batch['en'][i] for i in keep_indices],
+            'hi_en': [batch['hi_en'][i] for i in keep_indices]
+        }
+
+    # Parallel tokenization using C++ backend (100x faster than Python loops)
+    ds_train = ds_train_raw.map(tokenize_and_filter, batched=True, batch_size=1000, remove_columns=ds_train_raw.column_names)
+    ds_val = ds_val_raw.map(tokenize_and_filter, batched=True, batch_size=1000, remove_columns=ds_val_raw.column_names)
 
     print(f"Filtered validation examples: {len(ds_val)}")
     print(f"Removed validation examples: {len(ds_val_raw) - len(ds_val)}")
-    
-    
 
     print(f"Filtered training examples: {len(ds_train)}")
     print(f"Removed training examples: {len(ds_train_raw) - len(ds_train)}")
@@ -183,19 +206,6 @@ def get_ds(config):
     train_ds = BilingualDataset( ds_train, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
 
     val_ds = BilingualDataset( ds_val, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'] )
-
-    max_len_src = 0
-    max_len_tgt = 0
-
-    for item in ds_train:
-        src_ids = tokenizer_src.encode(item['en']).ids
-        tgt_ids = tokenizer_tgt.encode(item['hi_en']).ids
-
-        max_len_src = max(max_len_src, len(src_ids))
-        max_len_tgt = max(max_len_tgt, len(tgt_ids))
-
-    print(f'Max length of source sentence: {max_len_src}')
-    print(f'Max length of target sentence: {max_len_tgt}')
 
     train_dataloader = DataLoader(
         train_ds,
@@ -232,6 +242,10 @@ def train_model(config):
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
     model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
     
+    if torch.__version__ >= '2.0':
+        print("Compiling model for faster training...")
+        model = torch.compile(model)
+    
     # TensorBoard -> allows to visualise the loss / graphics / charts
     
     writer = SummaryWriter(config['experiment_name'])
@@ -250,9 +264,13 @@ def train_model(config):
     if config['preload']:
         model_filename = get_weights_file_path( config, config['preload'])
         print(f'Preloading model{model_filename}')
-        state =torch.load(model_filename)
-        intial_epoch = state['epoch'] + 1
+        
+        state = torch.load(model_filename, map_location=device)
+
+        model.load_state_dict(state['model_state_dict'])
         optimizer.load_state_dict(state['optimizer_state_dict'])
+
+        intial_epoch = state['epoch'] + 1
         global_step = state['global_step']
     
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_tgt.token_to_id('[PAD]'), label_smoothing=0.1).to(device) 
@@ -326,9 +344,11 @@ def train_model(config):
             # save the model at the end of the every epoch
             
         model_filename = get_weights_file_path(config, f'{epoch:02d}')
+        # Save the ORIGINAL (uncompiled) model's state dict for compatibility
+        model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
         torch.save({
             'epoch' : epoch,
-            'model_state_dict' : model.state_dict(),
+            'model_state_dict' : model_to_save.state_dict(),
             'optimizer_state_dict' : optimizer.state_dict(),
             'global_step' : global_step  
         }, model_filename)

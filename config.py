@@ -2,15 +2,15 @@ from pathlib import Path
 
 def get_config():
     return {
-        "batch_size": 4,
-        "gradient_accumulation_steps": 4,
+        "batch_size": 16,
+        "gradient_accumulation_steps": 1,
 
         "nums_epochs": 3,
 
         "lr": 3e-4,
         "weight_decay": 1e-2,
 
-        "seq_len": 256,
+        "seq_len": 64,
 
         "d_model": 512,
         "N": 6,
